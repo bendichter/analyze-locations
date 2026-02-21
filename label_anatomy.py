@@ -23,8 +23,10 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import h5py
 import remfile
@@ -532,6 +534,10 @@ def main():
         "--output", type=str, default="label_results.json",
         help="Summary report file (default: label_results.json)",
     )
+    parser.add_argument(
+        "--workers", type=int, default=8,
+        help="Number of parallel workers for NWB streaming (default: 8)",
+    )
     args = parser.parse_args()
 
     apply = args.apply
@@ -588,24 +594,28 @@ def main():
     }
     all_results = []
     targeted_mode = bool(args.dandiset)
+    cache_lock = threading.Lock()
 
-    def _log_result(result):
+    def _log_result(result, prefix=""):
         """Print details for a processed asset and update summary counters."""
         status = result["status"]
-        tqdm.write(f"    -> {status}")
+        tqdm.write(f"  {prefix}-> {status}")
         if result.get("matched_locations"):
             for loc, infos in result["matched_locations"].items():
                 names = ", ".join(f"{i['name']} (MBA_{i['id']})" for i in infos)
-                tqdm.write(f"       matched: {loc!r} -> {names}")
+                tqdm.write(f"     {prefix}matched: {loc!r} -> {names}")
         if result.get("unmatched_locations"):
             for loc in result["unmatched_locations"]:
-                tqdm.write(f"       unmatched: {loc!r}")
+                tqdm.write(f"     {prefix}unmatched: {loc!r}")
         if result.get("new_entries"):
             for entry in result["new_entries"]:
-                tqdm.write(f"       + {entry['name']} ({entry['identifier']})")
+                tqdm.write(f"     {prefix}+ {entry['name']} ({entry['identifier']})")
         if result.get("error"):
-            tqdm.write(f"       ERROR: {result['error']}")
+            tqdm.write(f"     {prefix}ERROR: {result['error']}")
 
+    def _record_result(result):
+        """Update summary counters (call under cache_lock)."""
+        status = result["status"]
         summary["assets_processed"] += 1
         if status == "updated":
             summary["assets_updated"] += 1
@@ -620,10 +630,37 @@ def main():
         elif status == "error":
             summary["assets_error"] += 1
 
+    def _process_and_record(ds_id, asset, pbar):
+        """Process one asset, log, and persist. Thread-safe."""
+        asset_id = asset["asset_id"]
+        path = asset["path"]
+        cache_key = (ds_id, asset_id)
+
+        with cache_lock:
+            if cache_key in label_cache:
+                cached = label_cache[cache_key]
+                tqdm.write(f"  [cached] {ds_id}/{path}: {cached['status']}")
+                all_results.append(cached)
+                summary["assets_cached"] += 1
+                pbar.update(1)
+                return
+
+        result = process_asset(ds_id, asset, lookups, apply=apply, api_key=api_key)
+
+        with cache_lock:
+            tqdm.write(f"  {ds_id}/{path}")
+            _log_result(result, prefix="  ")
+            _record_result(result)
+            append_label_cache(result)
+            label_cache[cache_key] = result
+            all_results.append(result)
+            pbar.update(1)
+
+    # Collect all (ds_id, asset) work items, filtering by species
+    work_items = []  # list of (ds_id, asset)
+
     if targeted_mode:
-        # Collect (ds_id, asset) pairs up front so tqdm tracks assets
         print("Checking species and collecting assets …")
-        asset_items = []  # list of (ds_id, asset)
         for ds_id in target_dandisets:
             if not check_species_mouse(ds_id):
                 print(f"  {ds_id}: skipping — not a mouse dataset")
@@ -631,61 +668,30 @@ def main():
                 continue
             summary["dandisets_processed"] += 1
             for asset in get_nwb_assets_paged(ds_id, max_assets=args.max_assets):
-                asset_items.append((ds_id, asset))
-
-        for ds_id, asset in tqdm(asset_items, desc="Assets", unit="asset"):
-            asset_id = asset["asset_id"]
-            path = asset["path"]
-            cache_key = (ds_id, asset_id)
-
-            if cache_key in label_cache:
-                cached = label_cache[cache_key]
-                tqdm.write(f"  [cached] {ds_id}/{path}: {cached['status']}")
-                all_results.append(cached)
-                summary["assets_cached"] += 1
-                continue
-
-            tqdm.write(f"  {ds_id}/{path} …")
-            result = process_asset(ds_id, asset, lookups, apply=apply, api_key=api_key)
-            _log_result(result)
-
-            append_label_cache(result)
-            label_cache[cache_key] = result
-            all_results.append(result)
+                work_items.append((ds_id, asset))
     else:
-        for ds_id in tqdm(target_dandisets, desc="Dandisets", unit="ds"):
-            tqdm.write(f"\n{'='*60}")
-            tqdm.write(f"Dandiset {ds_id}")
-
+        for ds_id in tqdm(target_dandisets, desc="Filtering", unit="ds"):
             if not check_species_mouse(ds_id):
-                tqdm.write(f"  Skipping — not a mouse dataset")
+                tqdm.write(f"  {ds_id}: skipping — not a mouse dataset")
                 summary["dandisets_skipped_species"] += 1
                 continue
-
             summary["dandisets_processed"] += 1
-
-            ds_results = []
             for asset in get_nwb_assets_paged(ds_id, max_assets=args.max_assets):
-                asset_id = asset["asset_id"]
-                path = asset["path"]
-                cache_key = (ds_id, asset_id)
+                work_items.append((ds_id, asset))
 
-                if cache_key in label_cache:
-                    cached = label_cache[cache_key]
-                    tqdm.write(f"  [cached] {path}: {cached['status']}")
-                    ds_results.append(cached)
-                    summary["assets_cached"] += 1
-                    continue
+    print(f"\n{len(work_items)} assets to process across {summary['dandisets_processed']} dandisets "
+          f"({args.workers} workers)")
 
-                tqdm.write(f"  Processing {path} …")
-                result = process_asset(ds_id, asset, lookups, apply=apply, api_key=api_key)
-                _log_result(result)
-
-                append_label_cache(result)
-                label_cache[cache_key] = result
-                ds_results.append(result)
-
-            all_results.extend(ds_results)
+    with tqdm(total=len(work_items), desc="Assets", unit="asset") as pbar:
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = [
+                executor.submit(_process_and_record, ds_id, asset, pbar)
+                for ds_id, asset in work_items
+            ]
+            for future in as_completed(futures):
+                exc = future.exception()
+                if exc:
+                    tqdm.write(f"  Worker error: {exc}")
 
     # Print summary
     print()

@@ -161,6 +161,85 @@ location values show two distinct patterns:
 None of these values match the Allen CCF directly, highlighting the need for
 structured metadata fields for intracellular recordings.
 
+## Automated Labeling Dry Run
+
+Using `label_anatomy.py`, we performed a dry run across all candidate
+dandisets — those with at least one Allen CCF-matching location value in
+`scan_cache.jsonl`. The tool streamed up to 10 NWB files per dandiset,
+matched location values against the Allen CCF, and identified which assets
+could be tagged with MBAO `Anatomy` entries.
+
+### Candidate Filtering
+
+Of the 786 scanned dandisets, **68** had at least one location value matching
+the Allen CCF. Of those, **48** are mouse datasets (`NCBITaxon_10090`) and
+**20** were skipped as non-mouse species.
+
+### Asset-Level Results
+
+| Status | Assets |
+|---|---|
+| Would update (has new anatomy terms) | 411 |
+| No CCF match (unmatched locations only) | 24 |
+| No location data in file | 15 |
+| Errors | 0 |
+| **Total assets processed** | **450** |
+
+**91% of assets** (411 / 450) across all 48 mouse dandisets would receive at
+least one new `Anatomy` entry.
+
+### Dandiset-Level Resolution Rates
+
+Among the 48 mouse dandisets processed, we checked what proportion have at
+least one asset with at least one resolvable location, broken down by
+location type:
+
+| Location type | Dandisets with field | Dandisets with resolvable location | % |
+|---|---|---|---|
+| `ImagingPlane.location` | 24 | 23 | **96%** |
+| `electrodes.location` | 25 | 25 | **100%** |
+| `IntracellularElectrode.location` | 0 | 0 | N/A |
+| **Any location type** | **48** | **48** | **100%** |
+
+Every mouse dandiset with CCF-candidate locations had at least one
+resolvable asset. Electrode locations resolved at 100%, and imaging plane
+locations at 96% (the one unresolved dandiset uses non-standard location
+strings). No mouse intracellular electrophysiology dandisets had
+CCF-matching locations in the scan cache.
+
+### Top Matched Structures
+
+| Structure | Assets | Dandisets |
+|---|---|---|
+| Field CA1 | 153 | 23 |
+| Primary visual area (VISp) | 97 | 16 |
+| root | 81 | 10 |
+| Midbrain (MB) | 55 | 12 |
+| Field CA3 | 46 | 11 |
+| Dentate gyrus, molecular layer (DG-mo) | 40 | 8 |
+| Thalamus (TH) | 37 | 11 |
+| Striatum (STR) | 37 | 6 |
+| Lateral posterior nucleus (LP) | 34 | 11 |
+| Dentate gyrus, granule cell layer (DG-sg) | 33 | 8 |
+
+### Notable Unmatched Values
+
+These are non-trivial location strings in mouse dandisets that did not match
+the Allen CCF, even after structured-string extraction and comma splitting:
+
+| Value | Assets | Dandisets | Notes |
+|---|---|---|---|
+| `RSC` | 11 | 2 | Informal abbreviation for retrosplenial cortex (= `RSP` in Allen CCF) |
+| `ca1-pyr`, `ca1-so`, `ca1-sr`, `ca1-slm` | 10 each | 1 | CA1 sublayers — not in Allen CCF |
+| `dg-mol`, `dg-val gc`, `dg-val hil` | 10 each | 1 | DG sublayers — not in Allen CCF |
+| `PFC` | 10 | 1 | Prefrontal cortex — composite, not a single Allen structure |
+| `No Area` | 10 | 1 | Placeholder |
+| `Entorhinal area medial part dorsal zone` | 10 | 1 | Close to Allen name but not exact |
+| `Above brain` | 10 | 1 | Non-anatomical (electrode outside brain) |
+| `MZMG` | 4 | 1 | Non-standard abbreviation |
+| `PPC, right hemisphere` | 2 | 1 | Posterior parietal cortex with hemisphere suffix |
+| `PM, right hemisphere` | 8 | 1 | Ambiguous — matched as principal mammillary tract (likely incorrect; probably means posterior medial cortex) |
+
 ## Recommendations
 
 1. **Adopt a controlled vocabulary.** For mouse data, the Allen CCF ontology
@@ -189,8 +268,12 @@ structured metadata fields for intracellular recordings.
 
 ## Reproducibility
 
-The scan was performed on 2025-02-19 using `scan_locations.py` in this
-repository. Results are cached in `scan_cache.jsonl` (per-dandiset) and
+The location scan was performed on 2025-02-19 using `scan_locations.py` in
+this repository. Results are cached in `scan_cache.jsonl` (per-dandiset) and
 aggregated in `location_results_all.json`. The Allen CCF ontology was fetched
-from `http://api.brain-map.org/api/v2/data/Structure/query.json` (ontology
-ID 1, 1,327 structures).
+from `http://api.brain-map.org/api/v2/structure_graph_download/1.json`
+(1,327 structures).
+
+The labeling dry run was performed on 2026-02-20 using `label_anatomy.py`
+with `--max-assets 10 --no-cache`. Full results are in
+`label_results_full.json`.

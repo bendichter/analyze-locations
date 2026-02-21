@@ -158,35 +158,55 @@ def _extract_area(location):
     return None
 
 
-def match_location(location, by_acronym, by_name, by_acronym_lower, by_name_lower):
-    """Match a single location string against Allen CCF structures.
-
-    Returns a structure dict or None.
-    """
-    loc = location.strip()
-    if loc.lower() in TRIVIAL_LOCATIONS:
-        return None
-
-    # Exact acronym
+def _match_single(loc, by_acronym, by_name, by_acronym_lower, by_name_lower):
+    """Match a single token against Allen CCF structures. Returns a structure dict or None."""
     if loc in by_acronym:
         return by_acronym[loc]
-    # Exact name
     if loc in by_name:
         return by_name[loc]
-    # Case-insensitive acronym
     loc_lower = loc.lower()
     if loc_lower in by_acronym_lower:
         return by_acronym_lower[loc_lower]
-    # Case-insensitive name
     if loc_lower in by_name_lower:
         return by_name_lower[loc_lower]
+    return None
+
+
+def match_location(location, by_acronym, by_name, by_acronym_lower, by_name_lower):
+    """Match a location string against Allen CCF structures.
+
+    Returns a list of matched structure dicts (may be empty).
+    Handles plain values, structured strings, and comma-separated lists.
+    """
+    loc = location.strip()
+    if loc.lower() in TRIVIAL_LOCATIONS:
+        return []
+
+    # Try as a single value first
+    result = _match_single(loc, by_acronym, by_name, by_acronym_lower, by_name_lower)
+    if result:
+        return [result]
 
     # Try extracting an area value from structured strings
     area = _extract_area(loc)
     if area:
         return match_location(area, by_acronym, by_name, by_acronym_lower, by_name_lower)
 
-    return None
+    # Try comma-separated list (e.g. "VISp,VISrl,VISlm,VISal")
+    if "," in loc:
+        parts = [p.strip() for p in loc.split(",")]
+        # Only treat as a list if at least one part matches — avoids splitting
+        # structured strings like "area: VISp,depth: 175" (already handled above)
+        matches = []
+        for part in parts:
+            if part and part.lower() not in TRIVIAL_LOCATIONS:
+                s = _match_single(part, by_acronym, by_name, by_acronym_lower, by_name_lower)
+                if s:
+                    matches.append(s)
+        if matches:
+            return matches
+
+    return []
 
 
 def structure_to_anatomy(structure):
@@ -237,7 +257,7 @@ def get_candidate_dandisets(scan_cache, lookups):
 
         matching = set()
         for loc in all_locations:
-            if match_location(loc, by_acronym, by_name, by_acronym_lower, by_name_lower):
+            if match_location(loc, by_acronym, by_name, by_acronym_lower, by_name_lower):  # non-empty list = truthy
                 matching.add(loc)
 
         if matching:
@@ -415,16 +435,16 @@ def process_asset(dandiset_id, asset, lookups, apply=False, api_key=None):
     anatomy_entries = []
     seen_ids = set()
     for loc in sorted(all_locations):
-        structure = match_location(loc, by_acronym, by_name, by_acronym_lower, by_name_lower)
-        if structure:
-            result["matched_locations"][loc] = {
-                "id": structure["id"],
-                "acronym": structure["acronym"],
-                "name": structure["name"],
-            }
-            if structure["id"] not in seen_ids:
-                seen_ids.add(structure["id"])
-                anatomy_entries.append(structure_to_anatomy(structure))
+        structures = match_location(loc, by_acronym, by_name, by_acronym_lower, by_name_lower)
+        if structures:
+            result["matched_locations"][loc] = [
+                {"id": s["id"], "acronym": s["acronym"], "name": s["name"]}
+                for s in structures
+            ]
+            for structure in structures:
+                if structure["id"] not in seen_ids:
+                    seen_ids.add(structure["id"])
+                    anatomy_entries.append(structure_to_anatomy(structure))
         else:
             if loc.strip().lower() not in TRIVIAL_LOCATIONS:
                 result["unmatched_locations"].append(loc)
@@ -574,8 +594,9 @@ def main():
         status = result["status"]
         tqdm.write(f"    -> {status}")
         if result.get("matched_locations"):
-            for loc, info in result["matched_locations"].items():
-                tqdm.write(f"       matched: {loc!r} -> {info['name']} (MBA_{info['id']})")
+            for loc, infos in result["matched_locations"].items():
+                names = ", ".join(f"{i['name']} (MBA_{i['id']})" for i in infos)
+                tqdm.write(f"       matched: {loc!r} -> {names}")
         if result.get("unmatched_locations"):
             for loc in result["unmatched_locations"]:
                 tqdm.write(f"       unmatched: {loc!r}")
